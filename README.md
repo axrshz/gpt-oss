@@ -1,4 +1,4 @@
-gpt oss implementation in pytorch.
+gpt-oss-20b implementation in pytorch.
 
 components:
 
