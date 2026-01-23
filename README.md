@@ -1,7 +1,7 @@
 gpt-oss-20b implementation in pytorch.
 
 > [!IMPORTANT]
-> this repo is only for learning purposes
+> this repo is only for learning purposes.
 
 components:
 
