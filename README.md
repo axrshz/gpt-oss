@@ -5,7 +5,8 @@ minimal gpt-oss implementation in pytorch.
 
 components:
 
+- RMSNorm (pre-norm)
+- Grouped Query Attention with attention sinks and sliding window
 - RoPE with YaRN
 - Mixture-of-Experts (MoE) with gated router
-- Grouped Query Attention with attention sinks and sliding window
-- SwiGLU, RMSNorm (pre-norm), KV-cache
+- SwiGLU, KV-cache
