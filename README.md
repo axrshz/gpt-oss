@@ -11,4 +11,4 @@ components:
 - Mixture-of-Experts (MoE) with gated router
 - SwiGLU and KV-cache
 
-reference: (this banger repo by vizuara)[https://github.com/VizuaraAILabs/nano-gpt-oss]
+reference: [this banger repo by vizuara](https://github.com/VizuaraAILabs/nano-gpt-oss)
