@@ -9,4 +9,4 @@ components:
 - Grouped Query Attention with attention sinks and sliding window
 - RoPE with YaRN
 - Mixture-of-Experts (MoE) with gated router
-- SwiGLU, KV-cache
+- SwiGLU and KV-cache
