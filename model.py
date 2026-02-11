@@ -256,7 +256,6 @@ def swiglu(x, alpha: float = 1.702, limit: float = 7.0):
     return out_glu * (x_linear + 1)
 
 class MLPBlock(torch.nn.Module):
-
     def __init__(
         self,
         config: ModelConfig,
