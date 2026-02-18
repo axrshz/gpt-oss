@@ -264,25 +264,23 @@ class MLPBlock(torch.nn.Module):
         super().__init__()
         self.num_experts = config.num_experts
         self.experts_per_token = config.experts_per_token
-        self.swiglu_limit = config.swiglu_limit
-        self.world_size = dist.get_world_size() if dist.is_initialized() else 1
+        self.swiglu_limit = config.swiglu_limit=
         self.norm = RMSNorm(config.hidden_size, device=device)
         self.gate = torch.nn.Linear(
             config.hidden_size, config.num_experts, device=device, dtype=torch.bfloat16
         )
-        assert config.intermediate_size % self.world_size == 0
         
         # Store experts as a list of separate modules to avoid indexing issues
         self.experts = torch.nn.ModuleList([
             torch.nn.Sequential(
                 torch.nn.Linear(
                     config.hidden_size, 
-                    config.intermediate_size * 2 // self.world_size, 
+                    config.intermediate_size * 2, 
                     device=device, 
                     dtype=torch.bfloat16
                 ),
                 torch.nn.Linear(
-                    config.intermediate_size // self.world_size, 
+                    config.intermediate_size, 
                     config.hidden_size, 
                     device=device, 
                     dtype=torch.bfloat16
