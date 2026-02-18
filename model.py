@@ -405,39 +405,6 @@ class Transformer(torch.nn.Module):
         )
         model.eval()
 
-        # # Load weights
-        # my_rank = dist.get_rank() if dist.is_initialized() else 0
-        # world_size = dist.get_world_size() if dist.is_initialized() else 1
-        # per_rank_intermediate_size = config.intermediate_size // world_size
-
-        # checkpoint = Checkpoint(path, device)
-
-        # for name, param in model.named_parameters():
-        #     loaded_tensor = checkpoint.get(name)
-
-        #     # Note: it would be more efficient to do sharding before upcasting from MXFP4,
-        #     # but for simplicity we do it after.
-        #     if "mlp1" in name:  # both weight and bias
-        #         loaded_tensor = loaded_tensor[
-        #             :,
-        #             my_rank * 2
-        #             * per_rank_intermediate_size : (my_rank + 1) * 2
-        #             * per_rank_intermediate_size,
-        #             ...,
-        #         ]
-        #     elif "mlp2_weight" in name:  # only weight
-        #         loaded_tensor = loaded_tensor[
-        #             ...,
-        #             my_rank
-        #             * per_rank_intermediate_size : (my_rank + 1)
-        #             * per_rank_intermediate_size,
-        #         ]
-        #     try:
-        #         param.data.copy_(loaded_tensor)
-        #     except:
-        #         print(f"{name=} {param.data.shape=} {loaded_tensor.shape=}")
-        #         raise
-
         return model
 
 
