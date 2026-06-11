@@ -2,31 +2,54 @@ import math
 
 import torch
 
+from .cache import Cache
 from .norm import RMSNorm
 from .rope import RotaryEmbedding
 
 
-def sdpa(Q, K, V, S, sm_scale, sliding_window=0):
-    # sliding_window == 0 means no sliding window
-    n_tokens, n_heads, q_mult, d_head = Q.shape
-    assert K.shape == (n_tokens, n_heads, d_head)
-    assert V.shape == (n_tokens, n_heads, d_head)
-    K = K[:, :, None, :].expand(-1, -1, q_mult, -1)
-    V = V[:, :, None, :].expand(-1, -1, q_mult, -1)
-    S = S.reshape(n_heads, q_mult, 1, 1).expand(-1, -1, n_tokens, -1)
-    mask = torch.triu(Q.new_full((n_tokens, n_tokens), -float("inf")), diagonal=1)
+def sdpa(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    sinks: torch.Tensor,
+    sm_scale: float,
+    sliding_window: int = 0,
+    offset: int | torch.Tensor = 0,
+) -> torch.Tensor:
+    batch_size, seq_len, n_kv_heads, n_groups, head_dim = query.shape
+    n_ctx = key.shape[1]
+    assert key.shape == (batch_size, n_ctx, n_kv_heads, head_dim)
+    assert value.shape == (batch_size, n_ctx, n_kv_heads, head_dim)
+
+    if isinstance(offset, torch.Tensor):
+        offset = int(offset.item())
+
+    key = key.unsqueeze(3).expand(
+        batch_size, n_ctx, n_kv_heads, n_groups, head_dim
+    )
+    value = value.unsqueeze(3).expand(
+        batch_size, n_ctx, n_kv_heads, n_groups, head_dim
+    )
+    sinks = sinks.reshape(n_kv_heads, n_groups, 1, 1).expand(
+        n_kv_heads, n_groups, seq_len, 1
+    )
+
+    mask = torch.triu(
+        query.new_full((seq_len, n_ctx), -float("inf")), diagonal=offset + 1
+    )
     if sliding_window > 0:
         mask += torch.tril(
-            mask.new_full((n_tokens, n_tokens), -float("inf")), diagonal=-sliding_window
+            mask.new_full((seq_len, n_ctx), -float("inf")),
+            diagonal=offset - sliding_window,
         )
-    QK = torch.einsum("qhmd,khmd->hmqk", Q, K)
-    QK *= sm_scale
-    QK += mask[None, None, :, :]
-    QK = torch.cat([QK, S], dim=-1)
-    W = torch.softmax(QK, dim=-1)
-    W = W[..., :-1]
-    attn = torch.einsum("hmqk,khmd->qhmd", W, V)
-    return attn.reshape(n_tokens, -1)
+
+    scores = torch.einsum("bqhmd,bkhmd->bhmqk", query, key)
+    scores *= sm_scale
+    scores += mask.unsqueeze(0).unsqueeze(1).unsqueeze(2)
+    scores = torch.cat((scores, sinks.unsqueeze(0)), dim=-1)
+    weights = torch.softmax(scores, dim=-1)[..., :-1]
+    output = torch.einsum("bhmqk,bkhmd->bqhmd", weights, value)
+    return output.reshape(batch_size, seq_len, -1)
 
 
 class AttentionBlock(torch.nn.Module):
@@ -35,17 +58,20 @@ class AttentionBlock(torch.nn.Module):
         config,
         layer_idx: int = 0,
         device: torch.device | None = None,
-    ):
+    ) -> None:
         super().__init__()
         self.head_dim = config.head_dim
         self.num_attention_heads = config.num_attention_heads
         self.num_key_value_heads = config.num_key_value_heads
-        # Only apply sliding window to every other layer
+        self.num_groups = self.num_attention_heads // self.num_key_value_heads
         self.sliding_window = config.sliding_window if layer_idx % 2 == 0 else 0
+
         self.sinks = torch.nn.Parameter(
-            torch.empty(config.num_attention_heads, device=device, dtype=torch.bfloat16)
+            torch.empty(
+                config.num_attention_heads, device=device, dtype=torch.bfloat16
+            )
         )
-        self.norm = RMSNorm(config.hidden_size, device=device)
+        self.norm = RMSNorm(config.hidden_size, config.norm_eps, device=device)
         qkv_dim = config.head_dim * (
             config.num_attention_heads + 2 * config.num_key_value_heads
         )
@@ -53,7 +79,7 @@ class AttentionBlock(torch.nn.Module):
             config.hidden_size, qkv_dim, device=device, dtype=torch.bfloat16
         )
         self.out = torch.nn.Linear(
-            config.head_dim * config.num_attention_heads,
+            config.num_attention_heads * config.head_dim,
             config.hidden_size,
             device=device,
             dtype=torch.bfloat16,
@@ -64,39 +90,60 @@ class AttentionBlock(torch.nn.Module):
             config.rope_theta,
             torch.float32,
             initial_context_length=config.initial_context_length,
+            max_context_length=(
+                config.initial_context_length * int(config.rope_scaling_factor)
+            ),
             scaling_factor=config.rope_scaling_factor,
             ntk_alpha=config.rope_ntk_alpha,
             ntk_beta=config.rope_ntk_beta,
             device=device,
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        t = self.norm(x)
-        qkv = self.qkv(t)
-        q = qkv[:, : self.num_attention_heads * self.head_dim].contiguous()
-        k = qkv[
-            :,
-            self.num_attention_heads
-            * self.head_dim : (self.num_attention_heads + self.num_key_value_heads)
-            * self.head_dim,
-        ].contiguous()
-        v = qkv[
-            :,
-            (self.num_attention_heads + self.num_key_value_heads)
-            * self.head_dim : (self.num_attention_heads + 2 * self.num_key_value_heads)
-            * self.head_dim,
-        ].contiguous()
+    def forward(
+        self, x: torch.Tensor, cache: Cache | None = None
+    ) -> torch.Tensor:
+        batch_size, seq_len, _ = x.shape
+        qkv = self.qkv(self.norm(x))
+
+        q_end = self.num_attention_heads * self.head_dim
+        k_end = q_end + self.num_key_value_heads * self.head_dim
+        q = qkv[:, :, :q_end].contiguous()
+        k = qkv[:, :, q_end:k_end].contiguous()
+        v = qkv[:, :, k_end:].contiguous()
 
         q = q.view(
-            -1,
+            batch_size, seq_len, self.num_attention_heads, self.head_dim
+        )
+        k = k.view(
+            batch_size, seq_len, self.num_key_value_heads, self.head_dim
+        )
+        v = v.view(
+            batch_size, seq_len, self.num_key_value_heads, self.head_dim
+        )
+
+        offset = (
+            cache.offset.clone()
+            if cache is not None
+            else torch.zeros((1,), dtype=torch.long, device=x.device)
+        )
+        q, k = self.rope(q, k, offset)
+        if cache is not None:
+            k, v = cache.extend(k, v)
+
+        q = q.view(
+            batch_size,
+            seq_len,
             self.num_key_value_heads,
-            self.num_attention_heads // self.num_key_value_heads,
+            self.num_groups,
             self.head_dim,
         )
-        k = k.view(-1, self.num_key_value_heads, self.head_dim)
-        v = v.view(-1, self.num_key_value_heads, self.head_dim)
-        q, k = self.rope(q, k)
-        t = sdpa(q, k, v, self.sinks, self.sm_scale, self.sliding_window)
-        t = self.out(t)
-        t = x + t
-        return t
+        output = sdpa(
+            q,
+            k,
+            v,
+            self.sinks,
+            self.sm_scale,
+            self.sliding_window,
+            offset,
+        )
+        return x + self.out(output)
